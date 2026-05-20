@@ -1,0 +1,25 @@
+{
+  "name": "now-here",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "npm --prefix server run dev",
+    "build": "npm --prefix client run build",
+    "lint": "npm --prefix client run lint",
+    "test": "npm --prefix server test",
+    "start": "npm --prefix server start",
+    "brevo:check": "npm --prefix server run brevo:check",
+    "brevo:logs": "npm --prefix server run brevo:logs --",
+    "seed": "node scripts/seedDatabase.js",
+    "db:clear": "node scripts/clearDatabase.js",
+    "admin:create": "node scripts/createAdmin.js"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "mongodb": "^7.1.1",
+    "react-leaflet": "^5.0.0",
+    "react-router-dom": "^7.14.1"
+  }
+}

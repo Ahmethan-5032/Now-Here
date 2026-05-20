@@ -1,0 +1,19 @@
+{
+  "name": "NOW Here",
+  "short_name": "NOW Here",
+  "description": "Yakındaki anıları haritada keşfet, paylaş, yorumla ve rotanı profilinde büyüt.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#070b10",
+  "theme_color": "#070b10",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "/now-here-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
