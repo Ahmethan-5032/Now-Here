@@ -1,8 +1,9 @@
-const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  import.meta.env.VITE_API_URL ||
-  ""
-).replace(/\/$/, "");
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || "";
+const localApiBaseUrl =
+  typeof window !== "undefined" && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+    ? "http://localhost:5000"
+    : "";
+const API_BASE_URL = (configuredApiBaseUrl || localApiBaseUrl).replace(/\/$/, "");
 const LOCAL_POSTS_KEY = "now-here-local-posts";
 const LEGACY_LOCAL_USERS_KEY = "now-here-local-users";
 const MAX_AUTH_TOKEN_LENGTH = 2800;
