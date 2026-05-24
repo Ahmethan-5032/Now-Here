@@ -72,6 +72,7 @@ const PostSchema = new mongoose.Schema(
     image: {
       type: String,
       default: "",
+      maxlength: 900000,
     },
     category: {
       type: String,

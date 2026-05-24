@@ -2,15 +2,62 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const User = require("../models/User");
 const { memoryUsers } = require("../data/memoryStore");
+const { getJwtSecret, isProduction } = require("../config/env");
+
+const SESSION_COOKIE_NAME = "nh_session";
+const MAX_TOKEN_LENGTH = 2400;
 
 function usesDatabase() {
   return mongoose.connection.readyState === 1;
 }
 
+function parseCookies(cookieHeader = "") {
+  return Object.fromEntries(
+    String(cookieHeader || "")
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        const key = index >= 0 ? part.slice(0, index) : part;
+        const value = index >= 0 ? part.slice(index + 1) : "";
+        return [decodeURIComponent(key), decodeURIComponent(value)];
+      })
+  );
+}
+
 function getToken(req) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  const cookieToken = cookies[SESSION_COOKIE_NAME] || "";
+  if (cookieToken && cookieToken.length <= MAX_TOKEN_LENGTH) return cookieToken;
+
   const header = req.headers.authorization || "";
   if (!header.startsWith("Bearer ")) return "";
-  return header.slice(7);
+  const token = header.slice(7);
+  return token.length <= MAX_TOKEN_LENGTH ? token : "";
+}
+
+function getCookieOptions() {
+  const sameSite = String(process.env.AUTH_COOKIE_SAMESITE || (isProduction() ? "none" : "lax")).toLowerCase();
+
+  return {
+    httpOnly: true,
+    secure: isProduction() || sameSite === "none",
+    sameSite: ["strict", "lax", "none"].includes(sameSite) ? sameSite : "lax",
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  };
+}
+
+function setAuthCookie(res, token) {
+  res.cookie(SESSION_COOKIE_NAME, token, getCookieOptions());
+}
+
+function clearAuthCookie(res) {
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    ...getCookieOptions(),
+    maxAge: undefined,
+  });
 }
 
 async function attachUser(req, res, next) {
@@ -18,8 +65,11 @@ async function attachUser(req, res, next) {
   if (!token) return next();
 
   try {
-    const secret = process.env.JWT_SECRET || "now-here-development-secret";
-    const payload = jwt.verify(token, secret);
+    const payload = jwt.verify(token, getJwtSecret(), {
+      algorithms: ["HS256"],
+      audience: "now-here-client",
+      issuer: "now-here-api",
+    });
     let user = null;
 
     if (usesDatabase()) {
@@ -69,6 +119,8 @@ function normalizeAuthUser(user) {
 
 module.exports = {
   attachUser,
+  clearAuthCookie,
   requireAuth,
   normalizeAuthUser,
+  setAuthCookie,
 };

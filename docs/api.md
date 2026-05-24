@@ -12,11 +12,10 @@ Sunucu durumunu ve aktif veri modunu dondurur.
 
 `POST /api/auth/request-code`
 
-E-posta veya telefon icin 6 haneli dogrulama kodu uretir.
+E-posta icin 6 haneli dogrulama kodu uretir. Rate limit uygulanir.
 
 ```json
 {
-  "channel": "email",
   "email": "ahmet@example.com"
 }
 ```
@@ -28,10 +27,8 @@ E-posta veya telefon icin 6 haneli dogrulama kodu uretir.
   "firstName": "Ahmet",
   "lastName": "Yilmaz",
   "avatarName": "ahmetgezgin",
-  "channel": "email",
   "email": "ahmet@example.com",
-  "phone": "",
-  "password": "123456",
+  "password": "GucluSifre123",
   "code": "123456"
 }
 ```
@@ -40,12 +37,12 @@ E-posta veya telefon icin 6 haneli dogrulama kodu uretir.
 
 ```json
 {
-  "identifier": "ahmet@example.com",
-  "password": "123456"
+  "email": "ahmet@example.com",
+  "password": "GucluSifre123"
 }
 ```
 
-Her iki auth endpoint'i de `token` ve public `user` objesi dondurur.
+Auth endpoint'leri httpOnly `nh_session` cookie set eder ve public `user` objesi dondurur. `AUTH_TOKEN_RESPONSE=true` yapilmadikca JWT response body icinde donmez.
 
 `GET /api/auth/me`
 
@@ -58,12 +55,13 @@ Profil fotografi, ad, soyad ve avatar adini gunceller.
 `POST /api/auth/me/distance`
 
 Rota bitince kullanicinin toplam mesafesine metre ekler.
+`routeProof` zorunludur; bu deger `/api/places/route` tarafindan uretilir.
 
 ## Posts
 
 `GET /api/posts`
 
-Tum paylasimlari en yeni once olacak sekilde dondurur.
+Giris yapmis kullanici icin paylasimlari en yeni once olacak sekilde dondurur.
 
 `POST /api/posts`
 

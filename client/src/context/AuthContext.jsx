@@ -1,52 +1,47 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
-import { fetchProfile, sanitizeStoredSession, updateProfile as updateProfileRequest } from "../lib/api";
+import {
+  clearClientSession,
+  fetchProfile,
+  logoutUser,
+  updateProfile as updateProfileRequest,
+} from "../lib/api";
 
 const AuthContext = createContext(null);
 
-function readInitialSession() {
-  const token = sanitizeStoredSession();
-  let user = null;
-
-  if (!token) {
-    return { token: "", user: null };
-  }
-
+function readStoredUser() {
   try {
-    user = JSON.parse(localStorage.getItem("user") || "null");
+    return JSON.parse(localStorage.getItem("user") || "null");
   } catch {
-    user = null;
+    return null;
   }
-
-  return { token, user };
 }
 
 export function AuthProvider({ children }) {
-  const [session, setSession] = useState(readInitialSession);
-  const { token, user } = session;
+  const [user, setUser] = useState(readStoredUser);
   const [profile, setProfile] = useState(null);
-  const [loadingProfile, setLoadingProfile] = useState(Boolean(token));
+  const [loadingProfile, setLoadingProfile] = useState(true);
 
-  const isAuthenticated = Boolean(token && user);
+  const isAuthenticated = Boolean(user);
 
   useEffect(() => {
-    if (!token) {
-      return;
-    }
-
     let alive = true;
+
     fetchProfile()
       .then((nextProfile) => {
         if (!alive) return;
         setProfile(nextProfile);
         if (nextProfile.user) {
-          setSession((current) => ({ ...current, user: nextProfile.user }));
+          setUser(nextProfile.user);
           localStorage.setItem("user", JSON.stringify(nextProfile.user));
+          localStorage.removeItem("token");
         }
       })
       .catch(() => {
         if (!alive) return;
+        clearClientSession();
+        setUser(null);
         setProfile(null);
       })
       .finally(() => {
@@ -56,40 +51,42 @@ export function AuthProvider({ children }) {
     return () => {
       alive = false;
     };
-  }, [token]);
+  }, []);
 
   function applySession(result) {
-    localStorage.setItem("token", result.token);
+    localStorage.removeItem("token");
     localStorage.setItem("user", JSON.stringify(result.user));
-    setLoadingProfile(true);
-    setSession({ token: result.token, user: result.user });
+    setUser(result.user);
+    setProfile((current) => (current ? { ...current, user: result.user } : current));
   }
 
-  function logout() {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    setSession({ token: "", user: null });
+  async function logout() {
+    await logoutUser().catch(() => null);
+    clearClientSession();
+    setUser(null);
     setProfile(null);
   }
 
   async function refreshProfile() {
     const nextProfile = await fetchProfile();
     setProfile(nextProfile);
-    setSession((current) => ({ ...current, user: nextProfile.user }));
+    setUser(nextProfile.user);
     localStorage.setItem("user", JSON.stringify(nextProfile.user));
+    localStorage.removeItem("token");
     return nextProfile;
   }
 
   async function updateProfile(payload) {
     const result = await updateProfileRequest(payload);
-    setSession((current) => ({ ...current, user: result.user }));
+    setUser(result.user);
     localStorage.setItem("user", JSON.stringify(result.user));
+    localStorage.removeItem("token");
     await refreshProfile();
     return result.user;
   }
 
   const value = {
-    token,
+    token: "",
     user,
     profile,
     loadingProfile,
@@ -112,8 +109,12 @@ export function useAuth() {
 }
 
 export function ProtectedRoute({ children }) {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, loadingProfile } = useAuth();
   const location = useLocation();
+
+  if (loadingProfile) {
+    return <main className="auth-page" aria-busy="true" />;
+  }
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;

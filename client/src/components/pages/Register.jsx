@@ -169,7 +169,9 @@ export default function Register() {
                   type="password"
                   name="password"
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={10}
+                  pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\\d).{10,128}"
+                  title="En az 10 karakter, bir buyuk harf, bir kucuk harf ve bir rakam kullan."
                   value={form.password}
                   onChange={updateField}
                   required

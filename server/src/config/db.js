@@ -1,7 +1,11 @@
 const mongoose = require("mongoose");
+const { isProduction } = require("./env");
 
 const connectDB = async () => {
   if (!process.env.MONGO_URI) {
+    if (isProduction()) {
+      throw new Error("MONGO_URI zorunlu. Production ortaminda bellek ici yedek mod kullanilamaz.");
+    }
     console.warn("MONGO_URI tanimli degil. API bellek ici yedek modda calisacak.");
     return false;
   }
@@ -13,6 +17,9 @@ const connectDB = async () => {
     console.log(`MongoDB baglantisi hazir: ${mongoose.connection.name}`);
     return true;
   } catch (err) {
+    if (isProduction()) {
+      throw err;
+    }
     console.warn("MongoDB baglanamadi. API bellek ici yedek modda calisacak.");
     console.warn(err.message);
     console.warn("Atlas kullaniyorsan Database Access kullanicisini ve Network Access IP iznini kontrol et.");

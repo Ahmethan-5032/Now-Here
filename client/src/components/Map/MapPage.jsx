@@ -341,6 +341,7 @@ export default function MapPage() {
         duration: formatDuration(currentRoute.duration),
         distanceMeters: currentRoute.distance,
         durationSeconds: currentRoute.duration,
+        routeProof: currentRoute.routeProof,
         steps: currentRoute.steps || [],
       });
 
@@ -363,8 +364,8 @@ export default function MapPage() {
     stopRouteTracking();
     setRoute(null);
     setRouteInfo(null);
-    if (meters >= MIN_TRACKED_ROUTE_METERS) {
-      await recordRouteDistance(meters).catch(() => null);
+    if (meters >= MIN_TRACKED_ROUTE_METERS && routeInfo?.routeProof) {
+      await recordRouteDistance(meters, routeInfo.routeProof).catch(() => null);
       await refreshProfile().catch(() => null);
       setNotice(`${formatDistance(meters)} gercek hareket profile islendi.`);
       setMobilePanel("feed");

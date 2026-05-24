@@ -6,10 +6,16 @@ const mongoose = require("mongoose");
 const User = require("../models/User");
 const Post = require("../models/Post");
 const { memoryUsers, memoryPosts, verificationCodes } = require("../data/memoryStore");
-const { requireAuth, normalizeAuthUser } = require("../middleware/auth");
+const { clearAuthCookie, requireAuth, normalizeAuthUser, setAuthCookie } = require("../middleware/auth");
+const { authLimiter, verificationLimiter, writeLimiter } = require("../middleware/security");
 const { deliverVerificationCode } = require("../services/verificationDelivery");
+const { getJwtSecret } = require("../config/env");
+const { cleanText, isEmail, isSafeDataImage, normalizeEmail, validatePassword } = require("../utils/validation");
+const { verifyRouteProof } = require("../utils/routeProof");
 
 const router = express.Router();
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-real-password", 12);
+const TOKEN_RESPONSE_ENABLED = process.env.AUTH_TOKEN_RESPONSE === "true";
 
 const badgeCatalog = [
   {
@@ -70,22 +76,22 @@ function createId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
-function normalizeEmail(email = "") {
-  return email.trim().toLowerCase();
-}
-
 function publicUser(user) {
   return normalizeAuthUser(user);
 }
 
 function signToken(user) {
-  const secret = process.env.JWT_SECRET || "now-here-development-secret";
   const source = typeof user.toObject === "function" ? user.toObject() : user;
-  return jwt.sign({ id: String(source._id || source.id) }, secret, { expiresIn: "7d" });
+  return jwt.sign({ id: String(source._id || source.id) }, getJwtSecret(), {
+    algorithm: "HS256",
+    expiresIn: "7d",
+    audience: "now-here-client",
+    issuer: "now-here-api",
+  });
 }
 
 function createCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 function codeKey(target) {
@@ -94,9 +100,28 @@ function codeKey(target) {
 
 function storeVerificationCode(target) {
   const code = createCode();
+  const now = Date.now();
+  for (const [key, record] of verificationCodes.entries()) {
+    if (record.expiresAt < now) verificationCodes.delete(key);
+  }
+  if (verificationCodes.size > 5000) {
+    const error = new Error("Dogrulama servisi yogun. Biraz sonra tekrar dene.");
+    error.status = 503;
+    throw error;
+  }
+  const existing = verificationCodes.get(codeKey(target));
+
+  if (existing?.lastSentAt && now - existing.lastSentAt < 60 * 1000) {
+    const error = new Error("Yeni kod istemeden once 60 saniye bekle.");
+    error.status = 429;
+    throw error;
+  }
+
   verificationCodes.set(codeKey(target), {
-    code,
-    expiresAt: Date.now() + 10 * 60 * 1000,
+    codeHash: crypto.createHash("sha256").update(code).digest("hex"),
+    attempts: 0,
+    lastSentAt: now,
+    expiresAt: now + 10 * 60 * 1000,
   });
   return code;
 }
@@ -119,7 +144,17 @@ function verifyCode(target, code) {
     return false;
   }
 
-  if (record.code !== String(code || "").trim()) {
+  record.attempts = (record.attempts || 0) + 1;
+  if (record.attempts > 5) {
+    verificationCodes.delete(key);
+    return false;
+  }
+
+  const codeHash = crypto.createHash("sha256").update(String(code || "").trim()).digest("hex");
+  const hashMatches =
+    record.codeHash.length === codeHash.length &&
+    crypto.timingSafeEqual(Buffer.from(record.codeHash), Buffer.from(codeHash));
+  if (!hashMatches) {
     return false;
   }
 
@@ -127,10 +162,20 @@ function verifyCode(target, code) {
   return true;
 }
 
+function respondWithSession(res, status, user, extra = {}) {
+  const token = signToken(user);
+  setAuthCookie(res, token);
+  return res.status(status).json({
+    ...extra,
+    ...(TOKEN_RESPONSE_ENABLED ? { token } : {}),
+    user: publicUser(user),
+  });
+}
+
 function validateRegisterInput(body) {
-  const firstName = String(body.firstName || "").trim();
-  const lastName = String(body.lastName || "").trim();
-  const avatarName = String(body.avatarName || body.displayName || "").trim();
+  const firstName = cleanText(body.firstName, 60);
+  const lastName = cleanText(body.lastName, 60);
+  const avatarName = cleanText(body.avatarName || body.displayName, 36);
   const password = String(body.password || "");
   const email = normalizeEmail(body.email || "");
   const target = email;
@@ -139,12 +184,25 @@ function validateRegisterInput(body) {
     return { error: "Ad, soyad ve avatar adi zorunlu." };
   }
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!/^[a-zA-ZğüşöçıİĞÜŞÖÇ0-9._ -]{2,60}$/.test(firstName)) {
+    return { error: "Ad sadece harf, rakam, bosluk, nokta, tire ve alt cizgi icerebilir." };
+  }
+
+  if (!/^[a-zA-ZğüşöçıİĞÜŞÖÇ0-9._ -]{2,60}$/.test(lastName)) {
+    return { error: "Soyad sadece harf, rakam, bosluk, nokta, tire ve alt cizgi icerebilir." };
+  }
+
+  if (!/^[a-zA-Z0-9._-]{3,36}$/.test(avatarName)) {
+    return { error: "Avatar adi 3-36 karakter olmali; harf, rakam, nokta, tire veya alt cizgi kullan." };
+  }
+
+  if (!isEmail(email)) {
     return { error: "Gecerli bir e-posta gir." };
   }
 
-  if (password.length < 6) {
-    return { error: "Sifre en az 6 karakter olmali." };
+  const passwordError = validatePassword(password);
+  if (passwordError) {
+    return { error: passwordError };
   }
 
   return { firstName, lastName, avatarName, password, email, target };
@@ -177,7 +235,13 @@ async function findExistingUser(email) {
 }
 
 async function createVerifiedUser(data) {
-  const passwordHash = await bcrypt.hash(data.password, 10);
+  if (!isSafeDataImage(data.profilePhoto || "")) {
+    const error = new Error("Profil fotografi yalnizca png, jpg veya webp ve 900KB alti olmali.");
+    error.status = 400;
+    throw error;
+  }
+
+  const passwordHash = await bcrypt.hash(data.password, 12);
   const displayName = data.avatarName;
 
   if (!usesDatabase()) {
@@ -190,10 +254,10 @@ async function createVerifiedUser(data) {
       email: data.email,
       passwordHash,
       profilePhoto: data.profilePhoto || "",
-      bio: data.bio || "",
-      city: data.city || "",
-      website: data.website || "",
-      statusText: data.statusText || "Kesifte",
+      bio: cleanText(data.bio, 220),
+      city: cleanText(data.city, 80),
+      website: cleanText(data.website, 140),
+      statusText: cleanText(data.statusText || "Kesifte", 80),
       interests: Array.isArray(data.interests) ? data.interests : [],
       profileTheme: data.profileTheme || "lime",
       emailVerified: true,
@@ -211,10 +275,10 @@ async function createVerifiedUser(data) {
     email: data.email,
     password: passwordHash,
     profilePhoto: data.profilePhoto || "",
-    bio: data.bio || "",
-    city: data.city || "",
-    website: data.website || "",
-    statusText: data.statusText || "Kesifte",
+    bio: cleanText(data.bio, 220),
+    city: cleanText(data.city, 80),
+    website: cleanText(data.website, 140),
+    statusText: cleanText(data.statusText || "Kesifte", 80),
     interests: Array.isArray(data.interests) ? data.interests : [],
     profileTheme: data.profileTheme || "lime",
     emailVerified: true,
@@ -256,8 +320,8 @@ function normalizeInterestList(value) {
   return Array.from(
     new Set(
       source
-        .map((item) => String(item).trim().replace(/^#/, "").toLowerCase())
-        .filter(Boolean)
+        .map((item) => cleanText(item, 24).replace(/^#/, "").toLowerCase())
+        .filter((item) => /^[a-z0-9ğüşöçı._-]{2,24}$/i.test(item))
     )
   ).slice(0, 8);
 }
@@ -347,11 +411,11 @@ function buildProfile(user, posts) {
   };
 }
 
-router.post("/request-code", async (req, res) => {
+router.post("/request-code", verificationLimiter, async (req, res) => {
   try {
     const target = normalizeEmail(req.body.email || "");
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(target)) {
+    if (!isEmail(target)) {
       return res.status(400).json({ message: "Gecerli bir e-posta gir." });
     }
 
@@ -369,7 +433,7 @@ router.post("/request-code", async (req, res) => {
   }
 });
 
-router.post("/register", async (req, res) => {
+router.post("/register", authLimiter, async (req, res) => {
   try {
     const data = validateRegisterInput(req.body);
     if (data.error) return res.status(400).json({ message: data.error });
@@ -389,14 +453,14 @@ router.post("/register", async (req, res) => {
       distanceMeters: 0,
     });
 
-    return res.status(201).json({ token: signToken(user), user: publicUser(user) });
+    return respondWithSession(res, 201, user);
   } catch (err) {
     console.error("register hata:", err);
-    return res.status(500).json({ message: "Kayit olusturulamadi." });
+    return res.status(err.status || 500).json({ message: err.status ? err.message : "Kayit olusturulamadi." });
   }
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", authLimiter, async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email || "");
     const password = String(req.body.password || "");
@@ -405,28 +469,33 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({ message: "E-posta ve sifre zorunlu." });
     }
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (!isEmail(email)) {
       return res.status(400).json({ message: "Gecerli bir e-posta gir." });
     }
 
     const user = await findUserByEmail(email);
-    const passwordHash = user?.password || user?.passwordHash;
+    const passwordHash = user?.password || user?.passwordHash || DUMMY_PASSWORD_HASH;
     const matches = await passwordMatches(password, passwordHash);
 
     if (!user || !matches) {
       return res.status(401).json({ message: "Giris bilgileri hatali." });
     }
 
-    return res.json({ token: signToken(user), user: publicUser(user) });
+    return respondWithSession(res, 200, user);
   } catch (err) {
     console.error("login hata:", err);
     return res.status(500).json({ message: "Giris yapilamadi." });
   }
 });
 
-router.post("/recover-local", async (req, res) => {
+router.post("/logout", (req, res) => {
+  clearAuthCookie(res);
+  return res.json({ ok: true });
+});
+
+router.post("/recover-local", authLimiter, async (req, res) => {
   try {
-    if (process.env.NODE_ENV === "production" && process.env.ALLOW_LOCAL_ACCOUNT_RECOVERY !== "true") {
+    if (process.env.ALLOW_LOCAL_ACCOUNT_RECOVERY !== "true") {
       return res.status(403).json({ message: "Yerel hesap kurtarma kapali." });
     }
 
@@ -442,7 +511,7 @@ router.post("/recover-local", async (req, res) => {
         return res.status(401).json({ message: "Giris bilgileri hatali." });
       }
 
-      return res.json({ token: signToken(existing), user: publicUser(existing), recovered: false });
+      return respondWithSession(res, 200, existing, { recovered: false });
     }
 
     const user = await createVerifiedUser({
@@ -451,7 +520,7 @@ router.post("/recover-local", async (req, res) => {
       distanceMeters: req.body.distanceMeters || 0,
     });
 
-    return res.status(201).json({ token: signToken(user), user: publicUser(user), recovered: true });
+    return respondWithSession(res, 201, user, { recovered: true });
   } catch (err) {
     console.error("local recovery hata:", err);
     return res.status(500).json({ message: "Yerel hesap MongoDB'ye tasinamadi." });
@@ -463,18 +532,23 @@ router.get("/me", requireAuth, async (req, res) => {
   return res.json(buildProfile(req.user, posts));
 });
 
-router.put("/me", requireAuth, async (req, res) => {
+router.put("/me", requireAuth, writeLimiter, async (req, res) => {
   try {
+    const profilePhoto = req.body.profilePhoto ?? req.user.profilePhoto;
+    if (!isSafeDataImage(profilePhoto || "")) {
+      return res.status(400).json({ message: "Profil fotografi yalnizca png, jpg veya webp ve 900KB alti olmali." });
+    }
+
     const updates = {
-      firstName: String(req.body.firstName || req.user.firstName || "").trim(),
-      lastName: String(req.body.lastName || req.user.lastName || "").trim(),
-      avatarName: String(req.body.avatarName || req.user.avatarName || "").trim(),
-      displayName: String(req.body.avatarName || req.user.displayName || "").trim(),
-      profilePhoto: req.body.profilePhoto ?? req.user.profilePhoto,
-      bio: String(req.body.bio ?? req.user.bio ?? "").trim().slice(0, 220),
-      city: String(req.body.city ?? req.user.city ?? "").trim().slice(0, 80),
-      website: String(req.body.website ?? req.user.website ?? "").trim().slice(0, 140),
-      statusText: String(req.body.statusText ?? req.user.statusText ?? "Kesifte").trim().slice(0, 80),
+      firstName: cleanText(req.body.firstName || req.user.firstName || "", 60),
+      lastName: cleanText(req.body.lastName || req.user.lastName || "", 60),
+      avatarName: cleanText(req.body.avatarName || req.user.avatarName || "", 36),
+      displayName: cleanText(req.body.avatarName || req.user.displayName || "", 36),
+      profilePhoto,
+      bio: cleanText(req.body.bio ?? req.user.bio ?? "", 220),
+      city: cleanText(req.body.city ?? req.user.city ?? "", 80),
+      website: cleanText(req.body.website ?? req.user.website ?? "", 140),
+      statusText: cleanText(req.body.statusText ?? req.user.statusText ?? "Kesifte", 80),
       interests: normalizeInterestList(req.body.interests ?? req.user.interests),
       profileTheme: ["lime", "aqua", "amber", "violet"].includes(req.body.profileTheme)
         ? req.body.profileTheme
@@ -485,12 +559,16 @@ router.put("/me", requireAuth, async (req, res) => {
       return res.status(400).json({ message: "Ad, soyad ve avatar adi zorunlu." });
     }
 
+    if (!/^[a-zA-Z0-9._-]{3,36}$/.test(updates.avatarName)) {
+      return res.status(400).json({ message: "Avatar adi 3-36 karakter olmali; harf, rakam, nokta, tire veya alt cizgi kullan." });
+    }
+
     let user;
     if (!usesDatabase()) {
       user = memoryUsers.find((item) => item.id === req.user.id);
       Object.assign(user, updates);
     } else {
-      user = await User.findByIdAndUpdate(req.user.id, updates, { new: true });
+      user = await User.findByIdAndUpdate(req.user.id, updates, { new: true, runValidators: true });
     }
 
     return res.json({ user: publicUser(user) });
@@ -500,8 +578,18 @@ router.put("/me", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/me/distance", requireAuth, async (req, res) => {
-  const meters = Math.max(0, Number(req.body.meters) || 0);
+router.post("/me/distance", requireAuth, writeLimiter, async (req, res) => {
+  const meters = Math.round(Math.max(0, Number(req.body.meters) || 0));
+  const proof = verifyRouteProof(req.body.routeProof, req.user.id);
+
+  if (!proof) {
+    return res.status(403).json({ message: "Rota dogrulama kaniti gecersiz." });
+  }
+
+  const maxAllowedMeters = Math.min(Number(proof.distance) * 1.15, 50000);
+  if (meters < 25 || meters > maxAllowedMeters) {
+    return res.status(400).json({ message: "Rota mesafesi dogrulanamadi." });
+  }
 
   if (!usesDatabase()) {
     const user = memoryUsers.find((item) => item.id === req.user.id);

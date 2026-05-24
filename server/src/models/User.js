@@ -25,6 +25,7 @@ const userSchema = new mongoose.Schema(
       trim: true,
       required: true,
       maxlength: 36,
+      match: /^[a-zA-Z0-9._-]{3,36}$/,
     },
     email: {
       type: String,
@@ -32,6 +33,8 @@ const userSchema = new mongoose.Schema(
       required: true,
       lowercase: true,
       trim: true,
+      maxlength: 254,
+      match: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/,
     },
     password: {
       type: String,
@@ -41,6 +44,7 @@ const userSchema = new mongoose.Schema(
     profilePhoto: {
       type: String,
       default: "",
+      maxlength: 900000,
     },
     bio: {
       type: String,
@@ -88,5 +92,8 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ avatarName: 1 });
 
 module.exports = mongoose.model("User", userSchema);

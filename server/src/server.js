@@ -11,19 +11,17 @@ const connectDB = require("./config/db");
 const authRoutes = require("./routes/authRoutes");
 const postRoutes = require("./routes/postRoutes");
 const placeRoutes = require("./routes/placeRoutes");
-const { attachUser } = require("./middleware/auth");
+const { attachUser, requireAuth } = require("./middleware/auth");
+const { getAllowedOrigins, validateSecurityEnv } = require("./config/env");
+const { applySecurity, globalLimiter, sanitizeRequest } = require("./middleware/security");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3000",
-  ...(process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
-];
+validateSecurityEnv();
+const allowedOrigins = getAllowedOrigins();
+
+applySecurity(app, allowedOrigins);
 
 app.use(
   cors({
@@ -37,8 +35,10 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: "12mb" }));
-app.use(express.urlencoded({ extended: true, limit: "12mb" }));
+app.use(globalLimiter);
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: false, limit: "2mb" }));
+app.use(sanitizeRequest);
 app.use(attachUser);
 
 app.get("/", (req, res) => {
@@ -59,16 +59,24 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/posts", postRoutes);
-app.use("/api/places", placeRoutes);
+app.use("/api/places", requireAuth, placeRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: "Endpoint bulunamadi" });
 });
 
 app.use((err, req, res, next) => {
-  console.error("API hata:", err);
+  console.error("API hata:", {
+    requestId: req.id,
+    status: err.status || 500,
+    message: err.message,
+    stack: process.env.NODE_ENV === "production" ? undefined : err.stack,
+  });
   res.status(err.status || 500).json({
-    message: err.message || "Sunucu hatasi",
+    message:
+      process.env.NODE_ENV === "production" && !err.status
+        ? "Sunucu hatasi"
+        : err.message || "Sunucu hatasi",
   });
 });
 

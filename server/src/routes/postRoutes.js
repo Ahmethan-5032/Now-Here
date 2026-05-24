@@ -1,5 +1,6 @@
 const express = require("express");
 const { requireAuth } = require("../middleware/auth");
+const { writeLimiter } = require("../middleware/security");
 const {
   getPosts,
   createPost,
@@ -10,10 +11,10 @@ const {
 
 const router = express.Router();
 
-router.get("/", getPosts);
-router.post("/", requireAuth, createPost);
-router.post("/:id/like", requireAuth, likePost);
-router.post("/:id/comments", requireAuth, commentPost);
-router.delete("/:id", requireAuth, deletePost);
+router.get("/", requireAuth, getPosts);
+router.post("/", requireAuth, writeLimiter, createPost);
+router.post("/:id/like", requireAuth, writeLimiter, likePost);
+router.post("/:id/comments", requireAuth, writeLimiter, commentPost);
+router.delete("/:id", requireAuth, writeLimiter, deletePost);
 
 module.exports = router;

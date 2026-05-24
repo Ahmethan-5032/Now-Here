@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const Post = require("../models/Post");
 const { memoryPosts } = require("../data/memoryStore");
+const { cleanText, isSafeDataImage, parseCoordinate } = require("../utils/validation");
 
 const validCategories = new Set(["genel", "diger", "kafe", "doga", "etkinlik", "spor", "sanat", "yemek", "alisveris"]);
 const validMoods = new Set(["calm", "social", "focus", "energy", "view"]);
@@ -19,10 +20,15 @@ function normalizeTags(tags) {
   return Array.from(
     new Set(
       source
-        .map((tag) => String(tag).trim().replace(/^#/, "").toLowerCase())
-        .filter(Boolean)
+        .map((tag) => cleanText(tag, 24).replace(/^#/, "").toLowerCase())
+        .filter((tag) => /^[a-z0-9ğüşöçı._-]{2,24}$/i.test(tag))
     )
   ).slice(0, 6);
+}
+
+function isValidPostId(id) {
+  const text = String(id || "");
+  return /^[a-zA-Z0-9._:-]{1,80}$/.test(text) && (!usesDatabase() || mongoose.Types.ObjectId.isValid(text));
 }
 
 function normalizePost(post, viewerId = "") {
@@ -53,8 +59,8 @@ function normalizePost(post, viewerId = "") {
 }
 
 function validatePostInput({ description = "", image = "", lat, lng, tags = [] }) {
-  const numericLat = Number(lat);
-  const numericLng = Number(lng);
+  const numericLat = parseCoordinate(lat, -90, 90);
+  const numericLng = parseCoordinate(lng, -180, 180);
 
   if (!description.trim() && !image) {
     return "Aciklama veya fotograf eklemelisin.";
@@ -68,13 +74,13 @@ function validatePostInput({ description = "", image = "", lat, lng, tags = [] }
     return "Etiketler cok uzun.";
   }
 
+  if (!isSafeDataImage(image || "")) {
+    return "Fotograf yalnizca png, jpg veya webp ve 900KB alti olmali.";
+  }
+
   if (
-    Number.isNaN(numericLat) ||
-    Number.isNaN(numericLng) ||
-    numericLat < -90 ||
-    numericLat > 90 ||
-    numericLng < -180 ||
-    numericLng > 180
+    numericLat === null ||
+    numericLng === null
   ) {
     return "Gecersiz konum.";
   }
@@ -83,8 +89,8 @@ function validatePostInput({ description = "", image = "", lat, lng, tags = [] }
 }
 
 function filterPosts(posts, req) {
-  const category = String(req.query.category || "").trim();
-  const q = String(req.query.q || "").trim().toLowerCase();
+  const category = cleanText(req.query.category, 24);
+  const q = cleanText(req.query.q, 80).toLowerCase();
 
   return posts.filter((post) => {
     if (category && category !== "all" && post.category !== category) return false;
@@ -147,13 +153,13 @@ exports.createPost = async (req, res) => {
       authorId: req.user.id,
       authorName: req.user.displayName || req.user.avatarName || "Gezgin",
       authorAvatar: req.user.avatarName || "",
-      description: description.trim(),
+      description: cleanText(description, 500),
       lat: Number(lat),
       lng: Number(lng),
-      placeName: String(placeName).trim() || "Konum",
+      placeName: cleanText(placeName, 160) || "Konum",
       image,
-      category: validCategories.has(category) ? category : "genel",
-      mood: validMoods.has(mood) ? mood : "calm",
+      category: validCategories.has(cleanText(category, 24)) ? cleanText(category, 24) : "genel",
+      mood: validMoods.has(cleanText(mood, 24)) ? cleanText(mood, 24) : "calm",
       rating: Math.max(0, Math.min(5, Number(rating) || 0)),
       tags: normalizeTags(tags),
       likedBy: [],
@@ -183,6 +189,10 @@ exports.createPost = async (req, res) => {
 
 exports.likePost = async (req, res) => {
   try {
+    if (!isValidPostId(req.params.id)) {
+      return res.status(400).json({ message: "Gecersiz post id." });
+    }
+
     if (!usesDatabase()) {
       const post = memoryPosts.find((item) => item._id === req.params.id);
       if (!post) return res.status(404).json({ message: "Post bulunamadi" });
@@ -217,7 +227,11 @@ exports.likePost = async (req, res) => {
 
 exports.commentPost = async (req, res) => {
   try {
-    const text = String(req.body.text || "").trim();
+    if (!isValidPostId(req.params.id)) {
+      return res.status(400).json({ message: "Gecersiz post id." });
+    }
+
+    const text = cleanText(req.body.text, 300);
     if (text.length < 2) {
       return res.status(400).json({ message: "Yorum en az 2 karakter olmali." });
     }
@@ -254,6 +268,10 @@ exports.commentPost = async (req, res) => {
 
 exports.deletePost = async (req, res) => {
   try {
+    if (!isValidPostId(req.params.id)) {
+      return res.status(400).json({ message: "Gecersiz post id." });
+    }
+
     if (!usesDatabase()) {
       const index = memoryPosts.findIndex((item) => item._id === req.params.id);
       if (index === -1) return res.status(404).json({ message: "Post bulunamadi" });

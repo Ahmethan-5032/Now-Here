@@ -1,7 +1,32 @@
 const express = require("express");
+const { createRouteProof } = require("../utils/routeProof");
+const { cleanText, parseCoordinate } = require("../utils/validation");
 
 const router = express.Router();
 const userAgent = "NOW-Here/1.0 (local-development)";
+const EXTERNAL_TIMEOUT_MS = 7000;
+
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const error = new Error("Harici servis yanit vermedi.");
+      error.status = 502;
+      throw error;
+    }
+
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function normalizeSearchQuery(query = "") {
   return query
@@ -23,8 +48,9 @@ function uniquePlaces(places) {
 }
 
 router.get("/search", async (req, res) => {
-  const query = String(req.query.q || "").trim();
+  const query = cleanText(req.query.q, 80);
   if (query.length < 2) return res.json([]);
+  if (query.length > 80) return res.status(400).json({ message: "Arama metni cok uzun." });
 
   const queries = Array.from(new Set([query, normalizeSearchQuery(query)]));
   const results = [];
@@ -39,10 +65,9 @@ router.get("/search", async (req, res) => {
       url.searchParams.set("countrycodes", "tr");
       url.searchParams.set("q", currentQuery);
 
-      const response = await fetch(url, {
+      const data = await fetchJson(url, {
         headers: { "User-Agent": userAgent },
       });
-      const data = await response.json();
       if (Array.isArray(data)) results.push(...data);
       if (results.length) break;
     }
@@ -56,9 +81,9 @@ router.get("/search", async (req, res) => {
 
 router.get("/reverse", async (req, res) => {
   try {
-    const lat = Number(req.query.lat);
-    const lon = Number(req.query.lng || req.query.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    const lat = parseCoordinate(req.query.lat, -90, 90);
+    const lon = parseCoordinate(req.query.lng || req.query.lon, -180, 180);
+    if (lat === null || lon === null) {
       return res.status(400).json({ message: "Gecersiz koordinat." });
     }
 
@@ -68,10 +93,9 @@ router.get("/reverse", async (req, res) => {
     url.searchParams.set("lat", String(lat));
     url.searchParams.set("lon", String(lon));
 
-    const response = await fetch(url, {
+    const data = await fetchJson(url, {
       headers: { "User-Agent": userAgent },
     });
-    const data = await response.json();
     return res.json(data);
   } catch (err) {
     console.error("reverse hata:", err.message);
@@ -81,12 +105,12 @@ router.get("/reverse", async (req, res) => {
 
 router.get("/route", async (req, res) => {
   try {
-    const fromLat = Number(req.query.fromLat);
-    const fromLng = Number(req.query.fromLng);
-    const toLat = Number(req.query.toLat);
-    const toLng = Number(req.query.toLng);
+    const fromLat = parseCoordinate(req.query.fromLat, -90, 90);
+    const fromLng = parseCoordinate(req.query.fromLng, -180, 180);
+    const toLat = parseCoordinate(req.query.toLat, -90, 90);
+    const toLng = parseCoordinate(req.query.toLng, -180, 180);
 
-    if (![fromLat, fromLng, toLat, toLng].every(Number.isFinite)) {
+    if ([fromLat, fromLng, toLat, toLng].some((value) => value === null)) {
       return res.status(400).json({ message: "Gecersiz rota koordinati." });
     }
 
@@ -97,8 +121,7 @@ router.get("/route", async (req, res) => {
     url.searchParams.set("geometries", "geojson");
     url.searchParams.set("steps", "true");
 
-    const response = await fetch(url);
-    const data = await response.json();
+    const data = await fetchJson(url);
     const route = data.routes?.[0];
 
     if (!route) {
@@ -119,6 +142,14 @@ router.get("/route", async (req, res) => {
     return res.json({
       distance: route.distance,
       duration: route.duration,
+      routeProof: createRouteProof({
+        userId: req.user.id,
+        distance: route.distance,
+        fromLat,
+        fromLng,
+        toLat,
+        toLng,
+      }),
       positions: route.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
       steps,
     });

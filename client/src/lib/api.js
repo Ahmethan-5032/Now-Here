@@ -4,48 +4,7 @@ const localApiBaseUrl =
     ? "http://localhost:5000"
     : "";
 const API_BASE_URL = (configuredApiBaseUrl || localApiBaseUrl).replace(/\/$/, "");
-const LOCAL_POSTS_KEY = "now-here-local-posts";
-const LEGACY_LOCAL_USERS_KEY = "now-here-local-users";
 const MAX_AUTH_TOKEN_LENGTH = 2800;
-
-const demoPosts = [
-  {
-    _id: "local-galata",
-    authorId: "",
-    authorName: "NOW Here",
-    description: "Galata tarafinda hizli bir mola ve sehir manzarasi.",
-    lat: 41.0256,
-    lng: 28.9742,
-    placeName: "Galata",
-    image: "",
-    category: "doga",
-    mood: "calm",
-    rating: 4,
-    tags: ["manzara", "yuruyus"],
-    likes: 12,
-    likedBy: [],
-    comments: [],
-    createdAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-  },
-  {
-    _id: "local-kadikoy",
-    authorId: "",
-    authorName: "NOW Here",
-    description: "Kahve, yuruyus ve kalabalik enerjisi icin guzel bir durak.",
-    lat: 40.9909,
-    lng: 29.028,
-    placeName: "Kadikoy",
-    image: "",
-    category: "kafe",
-    mood: "social",
-    rating: 5,
-    tags: ["kahve", "sahil"],
-    likes: 8,
-    likedBy: [],
-    comments: [],
-    createdAt: new Date(Date.now() - 1000 * 60 * 60 * 4).toISOString(),
-  },
-];
 
 export function sanitizeStoredSession() {
   const token = localStorage.getItem("token") || "";
@@ -61,6 +20,10 @@ export function sanitizeStoredSession() {
 function clearStoredSession() {
   localStorage.removeItem("token");
   localStorage.removeItem("user");
+}
+
+export function clearClientSession() {
+  clearStoredSession();
 }
 
 function buildUrl(path) {
@@ -83,6 +46,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(buildUrl(path), {
       ...fetchOptions,
+      credentials: "include",
       headers,
     });
   } catch {
@@ -116,63 +80,6 @@ async function request(path, options = {}) {
   return payload;
 }
 
-function readStoredJson(key, fallback) {
-  try {
-    return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStoredJson(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
-
-function getLocalPosts() {
-  const stored = readStoredJson(LOCAL_POSTS_KEY, []);
-  return stored.length ? stored : demoPosts;
-}
-
-function setLocalPosts(posts) {
-  writeStoredJson(LOCAL_POSTS_KEY, posts);
-}
-
-function getStoredUser() {
-  return readStoredJson("user", null);
-}
-
-function normalizeEmail(email = "") {
-  return String(email).trim().toLowerCase();
-}
-
-function findLegacyLocalUser(email) {
-  const normalized = normalizeEmail(email);
-  const users = readStoredJson(LEGACY_LOCAL_USERS_KEY, []);
-  return users.find((user) => normalizeEmail(user.email) === normalized);
-}
-
-async function recoverLegacyLocalUser(credentials) {
-  const legacyUser = findLegacyLocalUser(credentials.email);
-
-  if (!legacyUser || legacyUser.password !== credentials.password) {
-    return null;
-  }
-
-  return request("/api/auth/recover-local", {
-    method: "POST",
-    skipAuth: true,
-    body: JSON.stringify({
-      firstName: legacyUser.firstName || "Kullanici",
-      lastName: legacyUser.lastName || "Hesabi",
-      avatarName: legacyUser.avatarName || legacyUser.displayName || "Gezgin",
-      email: legacyUser.email,
-      password: credentials.password,
-      profilePhoto: legacyUser.profilePhoto || "",
-      distanceMeters: legacyUser.distanceMeters || 0,
-    }),
-  });
-}
-
 export async function requestVerificationCode(payload) {
   return request("/api/auth/request-code", {
     method: "POST",
@@ -187,19 +94,11 @@ export async function loginUser(credentials) {
     password: credentials.password,
   };
 
-  try {
-    return await request("/api/auth/login", {
-      method: "POST",
-      skipAuth: true,
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    if (error.status === 401) {
-      const recovered = await recoverLegacyLocalUser(payload);
-      if (recovered) return recovered;
-    }
-    throw error;
-  }
+  return request("/api/auth/login", {
+    method: "POST",
+    skipAuth: true,
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function registerUser(details) {
@@ -229,10 +128,17 @@ export async function updateProfile(payload) {
   });
 }
 
-export async function recordRouteDistance(meters) {
+export async function logoutUser() {
+  return request("/api/auth/logout", {
+    method: "POST",
+    skipAuth: true,
+  }).finally(clearStoredSession);
+}
+
+export async function recordRouteDistance(meters, routeProof) {
   return request("/api/auth/me/distance", {
     method: "POST",
-    body: JSON.stringify({ meters }),
+    body: JSON.stringify({ meters, routeProof }),
   });
 }
 
@@ -245,82 +151,28 @@ export async function fetchPosts(params = {}) {
     const posts = await request(endpoint);
     return Array.isArray(posts) ? posts : [];
   } catch {
-    return getLocalPosts();
+    return [];
   }
 }
 
 export async function createPost(post) {
-  try {
-    return await request("/api/posts", {
-      method: "POST",
-      body: JSON.stringify(post),
-    });
-  } catch {
-    const now = new Date().toISOString();
-    const user = getStoredUser() || {};
-    const localPost = {
-      _id: `local-${Date.now()}`,
-      authorId: user.id || "",
-      authorName: user.displayName || user.avatarName || "Gezgin",
-      authorAvatar: user.avatarName || user.displayName || "gezgin",
-      ...post,
-      likes: 0,
-      likedBy: [],
-      comments: [],
-      createdAt: now,
-      updatedAt: now,
-    };
-    const nextPosts = [localPost, ...getLocalPosts()];
-    setLocalPosts(nextPosts);
-    return localPost;
-  }
+  return request("/api/posts", {
+    method: "POST",
+    body: JSON.stringify(post),
+  });
 }
 
 export async function likePost(postId) {
-  try {
-    return await request(`/api/posts/${postId}/like`, {
-      method: "POST",
-    });
-  } catch {
-    const user = getStoredUser() || {};
-    const nextPosts = getLocalPosts().map((post) => {
-      if (post._id !== postId) return post;
-      const likedBy = post.likedBy || [];
-      const liked = likedBy.includes(user.id);
-      return {
-        ...post,
-        likedBy: liked ? likedBy.filter((id) => id !== user.id) : [...likedBy, user.id],
-        likes: liked ? Math.max(0, (post.likes || 0) - 1) : (post.likes || 0) + 1,
-        viewerLiked: !liked,
-      };
-    });
-    setLocalPosts(nextPosts);
-    return nextPosts.find((post) => post._id === postId);
-  }
+  return request(`/api/posts/${postId}/like`, {
+    method: "POST",
+  });
 }
 
 export async function commentPost(postId, text) {
-  try {
-    return await request(`/api/posts/${postId}/comments`, {
-      method: "POST",
-      body: JSON.stringify({ text }),
-    });
-  } catch {
-    const user = getStoredUser() || {};
-    const now = new Date().toISOString();
-    const comment = {
-      _id: `comment-${Date.now()}`,
-      userId: user.id || "",
-      userName: user.displayName || user.avatarName || "Gezgin",
-      text,
-      createdAt: now,
-    };
-    const nextPosts = getLocalPosts().map((post) =>
-      post._id === postId ? { ...post, comments: [...(post.comments || []), comment], updatedAt: now } : post
-    );
-    setLocalPosts(nextPosts);
-    return nextPosts.find((post) => post._id === postId);
-  }
+  return request(`/api/posts/${postId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
 }
 
 

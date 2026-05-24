@@ -19,7 +19,7 @@ async function run() {
   }
 
   await mongoose.connect(process.env.MONGO_URI);
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(password, 12);
   await User.findOneAndUpdate(
     { email },
     {
@@ -31,7 +31,7 @@ async function run() {
       password: passwordHash,
       emailVerified: true,
     },
-    { upsert: true, new: true }
+    { upsert: true, new: true, runValidators: true }
   );
   console.log(`${email} icin admin kullanici hazir.`);
   await mongoose.disconnect();
